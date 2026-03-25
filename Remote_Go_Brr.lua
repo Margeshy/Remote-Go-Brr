@@ -1,9 +1,7 @@
 -- Remote Go Brr v0.1.0
--- // Cleanup
 if shared.AEH_Cleanup then pcall(shared.AEH_Cleanup) end
 shared.AEH_Running = true
 
--- // Services
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local CoreGui           = game:GetService("CoreGui")
@@ -11,10 +9,15 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService       = game:GetService("HttpService")
 local LocalPlayer       = Players.LocalPlayer
 
--- // Rayfield
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
--- // State
+local IsInitializing = true
+local OriginalNotify = Rayfield.Notify
+Rayfield.Notify = function(self, data)
+    if IsInitializing then return end
+    OriginalNotify(self, data)
+end
+
 local Config = {
     Enabled        = false,
     FireIntervalMs = 100,
@@ -35,16 +38,12 @@ local ExcludeList    = {}
 local SpyHookActive  = shared.AEH_SpyHookActive or false
 local BrowseResults  = {}
 local SavePrefix     = "RemoteGoBrr/" .. game.PlaceId .. "_"
-local OldSavePrefix  = "RemoteHooker/" .. game.PlaceId .. "_"
-local LegacyPrefix   = "RemoteGoBrr_" .. game.PlaceId .. "_"
-local LegacyOld      = "RemoteHooker_" .. game.PlaceId .. "_"
 local HookedDirty    = true
 local LastStatsText  = ""
 local ActiveTime     = 0
-local ScanPath       = "ReplicatedStorage.remotes"
+local ScanPath       = "ReplicatedStorage"
 
--- // Folder Check
-if makefolder then pcall(makefolder, "RemoteGoBrr") pcall(makefolder, "RemoteHooker") end
+if makefolder then pcall(makefolder, "RemoteGoBrr") end
 
 -- // Utility
 local function formatNumber(n)
@@ -107,7 +106,7 @@ end
 
 -- // Save / Load
 local function saveHookedRemotes()
-    if not writefile then return end
+    if not writefile or IsInitializing then return end
     local hooks = {}
     for remote, hookData in pairs(Hooked) do
         if remote and remote.Parent then
@@ -136,7 +135,7 @@ local function saveHookedRemotes()
 end
 
 local function saveExcludeList()
-    if not writefile then return end
+    if not writefile or IsInitializing then return end
     local names = {}
     for name in pairs(ExcludeList) do table.insert(names, name) end
     pcall(writefile, SavePrefix .. "exclude.json", HttpService:JSONEncode(names))
@@ -152,17 +151,7 @@ local doScanRemotes, doStartSpy, doStopSpy, toggleSpy, doCopyResults
 local function loadHookedRemotes()
     if not readfile then return end
     local ok, raw = pcall(readfile, SavePrefix .. "hooked.json")
-    if not ok or not raw or raw == "" then
-        ok, raw = pcall(readfile, LegacyPrefix .. "hooked.json")
-        if not ok or not raw or raw == "" then
-            ok, raw = pcall(readfile, OldSavePrefix .. "hooked.json")
-            if not ok or not raw or raw == "" then
-                ok, raw = pcall(readfile, LegacyOld .. "hooked.json")
-                if not ok or not raw or raw == "" then return end
-            end
-        end
-        task.defer(saveHookedRemotes)
-    end
+    if not ok or not raw or raw == "" then return end
     local decoded
     local ok2 = pcall(function() decoded = HttpService:JSONDecode(raw) end)
     if not ok2 or not decoded then return end
@@ -172,12 +161,22 @@ local function loadHookedRemotes()
         entries = decoded.hooks
         if decoded.config then
             local c = decoded.config
+            local oldInit = IsInitializing
+            IsInitializing = true
             if c.fireInterval then Config.FireIntervalMs = c.fireInterval; if IntervalInput then IntervalInput:Set(tostring(c.fireInterval)) end end
-            if c.minInterval ~= nil then Config.MinIntervalMs = c.minInterval; if MinIntervalInput then MinIntervalInput:Set(tostring(c.minInterval or "")) end end
-            if c.maxInterval ~= nil then Config.MaxIntervalMs = c.maxInterval; if MaxIntervalInput then MaxIntervalInput:Set(tostring(c.maxInterval or "")) end end
+            if c.minInterval ~= nil and c.maxInterval ~= nil then
+                Config.MinIntervalMs = c.minInterval
+                Config.MaxIntervalMs = c.maxInterval
+                if JitterInput then JitterInput:Set(c.minInterval .. "-" .. c.maxInterval) end
+            elseif c.minInterval == nil and c.maxInterval == nil then
+                Config.MinIntervalMs = nil
+                Config.MaxIntervalMs = nil
+                if JitterInput then JitterInput:Set("") end
+            end
             if c.antiAFK ~= nil then Config.AntiAFK = c.antiAFK; if AFKToggle then AFKToggle:Set(c.antiAFK) end end
             if c.globalKeybinds ~= nil then Config.GlobalKeybinds = c.globalKeybinds; if GlobalKeyToggle then GlobalKeyToggle:Set(c.globalKeybinds) end end
             if c.showNonFirable ~= nil then Config.ShowNonFirable = c.showNonFirable; if ShowNonFirableToggle then ShowNonFirableToggle:Set(c.showNonFirable) end end
+            IsInitializing = oldInit
         end
     end
 
@@ -241,17 +240,7 @@ end
 local function loadExcludeList()
     if not readfile then return end
     local ok, raw = pcall(readfile, SavePrefix .. "exclude.json")
-    if not ok or not raw or raw == "" then
-        ok, raw = pcall(readfile, LegacyPrefix .. "exclude.json")
-        if not ok or not raw or raw == "" then
-            ok, raw = pcall(readfile, OldSavePrefix .. "exclude.json")
-            if not ok or not raw or raw == "" then
-                ok, raw = pcall(readfile, LegacyOld .. "exclude.json")
-                if not ok or not raw or raw == "" then return end
-            end
-        end
-        task.defer(saveExcludeList)
-    end
+    if not ok or not raw or raw == "" then return end
     local ok2, decoded = pcall(function() return HttpService:JSONDecode(raw) end)
     if not ok2 or not decoded then return end
     for _, name in ipairs(decoded) do ExcludeList[name] = true end
@@ -274,6 +263,21 @@ local function resolveHookedRemote(text)
     return nil, nil
 end
 
+local function getSavedProfiles()
+    local names = {}
+    if listfiles then
+        local ok, files = pcall(listfiles, "RemoteGoBrr")
+        if ok and type(files) == "table" then
+            for _, file in ipairs(files) do
+                local match = string.match(file, game.PlaceId .. "_profile_(.+)%.json$")
+                if match then table.insert(names, match) end
+            end
+        end
+    end
+    if #names == 0 then return {"(None)"} end
+    return names
+end
+
 -- // Window
 local Window = Rayfield:CreateWindow({
     Name            = "Remote Go Brr v0.1.0",
@@ -283,21 +287,19 @@ local Window = Rayfield:CreateWindow({
     Theme           = "Default",
     ToggleUIKeybind = Enum.KeyCode.LeftControl,
     ConfigurationSaving = {
-        Enabled    = true,
-        FolderName = "RemoteGoBrr",
-        FileName   = "UIConfig"
+        Enabled = false
     },
 })
 
 -- // Tab 1 - Main
 local MainTab = Window:CreateTab("Main", "zap")
 
-MainTab:CreateSection("Status")
+MainTab:CreateSection("Auto-Fire & Configuration")
 
 local StatusLabel = MainTab:CreateParagraph({ Title = "Engine", Content = "OFF  |  0 hooked" })
 local StatsLabel = MainTab:CreateParagraph({ Title = "Stats", Content = "Total: 0  |  0/sec" })
 
-local AutoToggle, IntervalInput, MinIntervalInput, MaxIntervalInput, AFKToggle, GlobalKeyToggle, ShowNonFirableToggle
+local AutoToggle, IntervalInput, JitterInput, SpyToggle, AFKToggle, GlobalKeyToggle, ShowNonFirableToggle
 
 AutoToggle = MainTab:CreateToggle({
     Name = "Enable Auto-Fire  [F]",
@@ -314,10 +316,8 @@ AutoToggle = MainTab:CreateToggle({
     end,
 })
 
-MainTab:CreateSection("Fire Configuration")
-
 IntervalInput = MainTab:CreateInput({
-    Name = "Fire Interval (ms)",
+    Name = "Base Interval (ms)",
     CurrentValue = "100",
     PlaceholderText = "100",
     RemoveTextAfterFocusLost = false,
@@ -327,39 +327,46 @@ IntervalInput = MainTab:CreateInput({
         if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
         num = math.floor(math.max(1, num))
         Config.FireIntervalMs = num
-        Rayfield:Notify({ Title = num .. "ms  (~" .. string.format("%.0f", 1000/num) .. "/sec)", Duration = 2 })
+        if not IsInitializing then saveHookedRemotes() end
+        Rayfield:Notify({ 
+            Title = "Interval Set", 
+            Content = num .. "ms  (~" .. string.format("%.0f", 1000/num) .. "/sec)", 
+            Duration = 2 
+        })
     end,
 })
 
-MinIntervalInput = MainTab:CreateInput({
-    Name = "Min Interval (ms)",
+JitterInput = MainTab:CreateInput({
+    Name = "Random Range (Min-Max)",
     CurrentValue = "",
-    PlaceholderText = "Leave blank to use Fire Interval",
+    PlaceholderText = "e.g. 50-200 (leave blank to disable)",
     RemoveTextAfterFocusLost = false,
-    Flag = "MinIntervalInput",
+    Flag = "JitterInput",
     Callback = function(text)
-        if text == "" then Config.MinIntervalMs = nil; Rayfield:Notify({ Title = "Min Interval cleared", Duration = 2 }); return end
-        local num = tonumber(text)
-        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
-        num = math.floor(math.max(1, num))
-        Config.MinIntervalMs = num
-        Rayfield:Notify({ Title = "Min Interval: " .. num .. "ms", Duration = 2 })
-    end,
-})
-
-MaxIntervalInput = MainTab:CreateInput({
-    Name = "Max Interval (ms)",
-    CurrentValue = "",
-    PlaceholderText = "Leave blank to use Fire Interval",
-    RemoveTextAfterFocusLost = false,
-    Flag = "MaxIntervalInput",
-    Callback = function(text)
-        if text == "" then Config.MaxIntervalMs = nil; Rayfield:Notify({ Title = "Max Interval cleared", Duration = 2 }); return end
-        local num = tonumber(text)
-        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
-        num = math.floor(math.max(1, num))
-        Config.MaxIntervalMs = num
-        Rayfield:Notify({ Title = "Max Interval: " .. num .. "ms", Duration = 2 })
+        if text == "" or not string.find(text, "[-%,]") then
+            Config.MinIntervalMs = nil
+            Config.MaxIntervalMs = nil
+            if not IsInitializing then saveHookedRemotes() end
+            if text ~= "" then
+                Rayfield:Notify({ Title = "Format Error", Content = "Use MIN-MAX or MIN,MAX", Duration = 2 })
+            else
+                Rayfield:Notify({ Title = "Randomization Disabled", Content = "Using base interval.", Duration = 2 })
+            end
+            return
+        end
+        local min, max = string.match(text, "(%d+)[-%,](%d+)")
+        if min and max then
+            Config.MinIntervalMs = math.floor(tonumber(min))
+            Config.MaxIntervalMs = math.floor(tonumber(max))
+            if not IsInitializing then saveHookedRemotes() end
+            Rayfield:Notify({ 
+                Title = "Random Range Set", 
+                Content = min .. "ms to " .. max .. "ms", 
+                Duration = 2 
+            })
+        else
+            Rayfield:Notify({ Title = "Error", Content = "Invalid format. Use e.g. 50-200", Duration = 2 })
+        end
     end,
 })
 
@@ -476,117 +483,18 @@ MainTab:CreateInput({
     end,
 })
 
-MainTab:CreateSection("Profiles")
-
-local ProfileActionType = "Load"
-
-MainTab:CreateDropdown({
-    Name = "Action Type",
-    Options = {"Load", "Save"},
-    CurrentOption = {"Load"},
-    MultipleOptions = false,
-    Flag = "ProfileActionDropdown",
-    Callback = function(Options) ProfileActionType = Options[1] or Options end,
-})
-
-MainTab:CreateInput({
-    Name = "Profile Name",
-    CurrentValue = "",
-    PlaceholderText = "e.g. xp_farm",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(name)
-        if name == "" then return end
-        if ProfileActionType == "Save" then
-            local hooks = {}
-            for remote, hookData in pairs(Hooked) do
-                if remote and remote.Parent then
-                    table.insert(hooks, {
-                        path = fullPath(remote), argString = hookData.argString or "",
-                        intervalMs = hookData.intervalMs, burstLimit = hookData.burstLimit,
-                    })
-                end
-            end
-            local payload = {
-                version = "2",
-                hooks = hooks,
-                config = {
-                    fireInterval = Config.FireIntervalMs,
-                    minInterval = Config.MinIntervalMs,
-                    maxInterval = Config.MaxIntervalMs,
-                    antiAFK = Config.AntiAFK,
-                    globalKeybinds = Config.GlobalKeybinds,
-                    showNonFirable = Config.ShowNonFirable
-                }
-            }
-            pcall(writefile, SavePrefix .. "profile_" .. name .. ".json", HttpService:JSONEncode(payload))
-            Rayfield:Notify({ Title = "Profile Saved", Content = name .. " (" .. #hooks .. " remotes + settings)", Duration = 3 })
-        else
-            local ok, raw = pcall(readfile, SavePrefix .. "profile_" .. name .. ".json")
-            if not ok or not raw then 
-                ok, raw = pcall(readfile, LegacyPrefix .. "profile_" .. name .. ".json")
-                if not ok or not raw then
-                    Rayfield:Notify({ Title = "Not found", Content = name, Duration = 2 })
-                    return 
-                end
-            end
-            if clearAll then clearAll() end
-            local decoded
-            pcall(function() decoded = HttpService:JSONDecode(raw) end)
-            if type(decoded) ~= "table" then return end
-            
-            local entries = decoded
-            if decoded.version == "2" then
-                entries = decoded.hooks
-                if decoded.config then
-                    local c = decoded.config
-                    if c.fireInterval then Config.FireIntervalMs = c.fireInterval; if IntervalInput then IntervalInput:Set(tostring(c.fireInterval)) end end
-                    if c.minInterval ~= nil then Config.MinIntervalMs = c.minInterval; if MinIntervalInput then MinIntervalInput:Set(tostring(c.minInterval or "")) end end
-                    if c.maxInterval ~= nil then Config.MaxIntervalMs = c.maxInterval; if MaxIntervalInput then MaxIntervalInput:Set(tostring(c.maxInterval or "")) end end
-                    if c.antiAFK ~= nil then Config.AntiAFK = c.antiAFK; if AFKToggle then AFKToggle:Set(c.antiAFK) end end
-                    if c.globalKeybinds ~= nil then Config.GlobalKeybinds = c.globalKeybinds; if GlobalKeyToggle then GlobalKeyToggle:Set(c.globalKeybinds) end end
-                    if c.showNonFirable ~= nil then Config.ShowNonFirable = c.showNonFirable; if ShowNonFirableToggle then ShowNonFirableToggle:Set(c.showNonFirable) end end
-                end
-            end
-            
-            local loaded = 0
-            for _, entry in ipairs(entries) do
-                local parts = string.split(entry.path, ".")
-                local current = game
-                for _, p in ipairs(parts) do
-                    current = current:FindFirstChild(p)
-                    if not current then break end
-                end
-                if current and isFirable(current) then
-                    hookRemote(current, entry.argString or "")
-                    if entry.intervalMs then Hooked[current].intervalMs = entry.intervalMs end
-                    if entry.burstLimit then Hooked[current].burstLimit = entry.burstLimit end
-                    loaded = loaded + 1
-                end
-            end
-            Rayfield:Notify({ Title = "Profile Loaded", Content = name .. " - " .. loaded .. " remote(s)", Duration = 3 })
-        end
-    end,
-})
-
 -- // Tab 2 - Browse
 local BrowseTab = Window:CreateTab("Browse", "folder")
 
 BrowseTab:CreateSection("Scan")
 
-ShowNonFirableToggle = BrowseTab:CreateToggle({
-    Name = "Show non-firable remotes in scan",
-    CurrentValue = false,
-    Flag = "RGB_ShowNonFirable",
-    Callback = function(val) Config.ShowNonFirable = val end,
-})
-
 BrowseTab:CreateInput({
     Name = "Scan Path",
-    CurrentValue = "ReplicatedStorage.remotes",
-    PlaceholderText = "ReplicatedStorage.remotes",
+    CurrentValue = "ReplicatedStorage",
+    PlaceholderText = "e.g. ReplicatedStorage.remotes",
     RemoveTextAfterFocusLost = false,
     Callback = function(text)
-        if text == "" then ScanPath = "ReplicatedStorage.remotes"; return end
+        if text == "" then ScanPath = "ReplicatedStorage"; return end
         ScanPath = text
     end,
 })
@@ -648,6 +556,16 @@ end
 
 BrowseTab:CreateButton({ Name = "Scan Path  [G]", Callback = function() if doScanRemotes then doScanRemotes(false) end end })
 BrowseTab:CreateButton({ Name = "Full Game Scan", Callback = function() if doScanRemotes then doScanRemotes(true) end end })
+
+ShowNonFirableToggle = BrowseTab:CreateToggle({
+    Name = "Show non-firable remotes in scan",
+    CurrentValue = false,
+    Flag = "RGB_ShowNonFirable",
+    Callback = function(val) 
+        Config.ShowNonFirable = val 
+        if not IsInitializing then saveHookedRemotes() end
+    end,
+})
 
 BrowseTab:CreateSection("Hook from List")
 
@@ -728,104 +646,23 @@ local SpyTab = Window:CreateTab("Spy", "search")
 SpyTab:CreateSection("Controls")
 
 local SpyStatusLabel = SpyTab:CreateParagraph({ Title = "Spy Status", Content = "Idle" })
-
 local LogParagraph = SpyTab:CreateParagraph({ Title = "Captured", Content = "--" })
 
-doStartSpy = function()
-    if IsLogging then Rayfield:Notify({ Title = "Already running", Duration = 2 }); return end
-    if not hookmetamethod then Rayfield:Notify({ Title = "Error", Content = "hookmetamethod not available", Duration = 3 }); return end
-
-    RemoteLog = {}
-    IsLogging = true
-    SpyStatusLabel:Set({ Title = "Spy Status", Content = "RUNNING - click things in-game" })
-
-    if not SpyHookActive then
-        SpyHookActive = true
-        shared.AEH_SpyHookActive = true
-        local oldNc
-        oldNc = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            if IsLogging then
-                local isFire   = (method == "FireServer" and (self:IsA("RemoteEvent") or self:IsA("UnreliableRemoteEvent")))
-                local isInvoke = (method == "InvokeServer" and self:IsA("RemoteFunction"))
-                if (isFire or isInvoke) and not ExcludeList[self.Name] then
-                    local already = false
-                    for _, entry in ipairs(RemoteLog) do
-                        if entry.name == self.Name then already = true; break end
-                    end
-                    if not already then
-                        local argStrs = {}
-                        for _, arg in ipairs({...}) do
-                            local t = typeof(arg)
-                            if t == "string" then table.insert(argStrs, '"' .. tostring(arg) .. '"')
-                            elseif t == "Instance" then table.insert(argStrs, fullPath(arg))
-                            else table.insert(argStrs, tostring(arg)) end
-                        end
-                        table.insert(RemoteLog, {
-                            remote = self, name = self.Name, class = self.ClassName,
-                            path = fullPath(self), argStrs = argStrs,
-                        })
-                    end
-                end
-            end
-            return oldNc(self, ...)
-        end)
-    end
-
-    Rayfield:Notify({ Title = "Spy Started", Content = "Click buttons in-game, then Stop.", Duration = 3 })
-end
-
-SpyTab:CreateButton({ Name = "Start Spy  [H]", Callback = function() if doStartSpy then doStartSpy() end end })
-
-doStopSpy = function()
-    if not IsLogging then Rayfield:Notify({ Title = "Not running", Duration = 2 }); return end
-    IsLogging = false
-    SpyStatusLabel:Set({ Title = "Spy Status", Content = "Stopped  (" .. #RemoteLog .. " captured)" })
-    Rayfield:Notify({ Title = "Spy Stopped", Content = #RemoteLog .. " remote(s) captured.", Duration = 3 })
-
-    if #RemoteLog == 0 then
-        LogParagraph:Set({ Title = "Nothing Captured", Content = "No remotes fired. Check exclude list." })
-        return
-    end
-
-    local lines = {}
-    for i, entry in ipairs(RemoteLog) do
-        local cls = shortClassFromName(entry.class)
-        local args = #entry.argStrs > 0 and table.concat(entry.argStrs, ", ") or "(no args)"
-        lines[i] = i .. ".  " .. entry.name .. "  (" .. cls .. ")" ..
-                   "\n     " .. entry.path ..
-                   "\n     Args: " .. args
-    end
-    LogParagraph:Set({ Title = "Captured " .. #RemoteLog, Content = table.concat(lines, "\n\n") })
-end
-
-SpyTab:CreateButton({ Name = "Stop and Show  [H]", Callback = function() if doStopSpy then doStopSpy() end end })
-
-toggleSpy = function()
-    if IsLogging then doStopSpy() else doStartSpy() end
-end
-
-doCopyResults = function()
-    if #RemoteLog == 0 then Rayfield:Notify({ Title = "Nothing to copy", Content = "Run spy first.", Duration = 2 }); return end
-    local lines = {}
-    for i, entry in ipairs(RemoteLog) do
-        local args = #entry.argStrs > 0 and table.concat(entry.argStrs, ", ") or "(no args)"
-        lines[i] = i .. ". " .. entry.name .. " - " .. entry.path .. " - Args: " .. args
-    end
-    if setclipboard then
-        setclipboard(table.concat(lines, "\n"))
-        Rayfield:Notify({ Title = "Copied", Content = #RemoteLog .. " remote(s)", Duration = 2 })
-    else
-        Rayfield:Notify({ Title = "Error", Content = "setclipboard not available", Duration = 3 })
-    end
-end
-
-SpyTab:CreateButton({ Name = "Copy Results  [C]", Callback = function() if doCopyResults then doCopyResults() end end })
-
-SpyTab:CreateSection("Hook from Spy Results")
+SpyToggle = SpyTab:CreateToggle({
+    Name = "Active Spy  [H]",
+    CurrentValue = false,
+    Flag = "RGB_SpyToggle",
+    Callback = function(val)
+        if val then
+            if not IsLogging then doStartSpy() end
+        else
+            if IsLogging then doStopSpy() end
+        end
+    end,
+})
 
 SpyTab:CreateInput({
-    Name = "Remote",
+    Name = "Hook Remote",
     CurrentValue = "",
     PlaceholderText = "1  or  1,3  or  all",
     RemoveTextAfterFocusLost = true,
@@ -853,6 +690,96 @@ SpyTab:CreateInput({
         Rayfield:Notify({ Title = "Hooked " .. #names, Content = table.concat(names, "\n"), Duration = 3 })
     end,
 })
+
+doStartSpy = function()
+    if IsLogging then Rayfield:Notify({ Title = "Already running", Duration = 2 }); return end
+    if not hookmetamethod then Rayfield:Notify({ Title = "Error", Content = "hookmetamethod not available", Duration = 3 }); return end
+
+    RemoteLog = {}
+    IsLogging = true
+    SpyStatusLabel:Set({ Title = "Spy Status", Content = "RUNNING - click things in-game" })
+
+    if not SpyHookActive then
+        SpyHookActive = true
+        shared.AEH_SpyHookActive = true
+        local oldNc
+        oldNc = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            if IsLogging then
+                local isFire   = (method == "FireServer" and (self:IsA("RemoteEvent") or self:IsA("UnreliableRemoteEvent")))
+                local isInvoke = (method == "InvokeServer" and self:IsA("RemoteFunction"))
+                if (isFire or isInvoke) and not ExcludeList[self.Name] and not Hooked[self] then
+                    local already = false
+                    for _, entry in ipairs(RemoteLog) do
+                        if entry.name == self.Name then already = true; break end
+                    end
+                    if not already then
+                        local argStrs = {}
+                        for _, arg in ipairs({...}) do
+                            local t = typeof(arg)
+                            if t == "string" then table.insert(argStrs, '"' .. tostring(arg) .. '"')
+                            elseif t == "Instance" then table.insert(argStrs, fullPath(arg))
+                            else table.insert(argStrs, tostring(arg)) end
+                        end
+                        if #RemoteLog >= 1000 then table.remove(RemoteLog, 1) end
+                        table.insert(RemoteLog, {
+                            remote = self, name = self.Name, class = self.ClassName,
+                            path = fullPath(self), argStrs = argStrs,
+                        })
+                    end
+                end
+            end
+            return oldNc(self, ...)
+        end)
+    end
+
+    Rayfield:Notify({ Title = "Spy Started", Content = "Click buttons in-game, then Stop.", Duration = 3 })
+end
+
+doStopSpy = function()
+    if not IsLogging then return end
+    IsLogging = false
+    if SpyToggle then SpyToggle:Set(false) end
+    SpyStatusLabel:Set({ Title = "Spy Status", Content = "Stopped  (" .. #RemoteLog .. " captured)" })
+    Rayfield:Notify({ Title = "Spy Stopped", Content = #RemoteLog .. " remote(s) captured.", Duration = 3 })
+
+    if #RemoteLog == 0 then
+        LogParagraph:Set({ Title = "Nothing Captured", Content = "No remotes fired. Check exclude list." })
+        return
+    end
+
+    local lines = {}
+    for i, entry in ipairs(RemoteLog) do
+        local cls = shortClassFromName(entry.class)
+        local args = #entry.argStrs > 0 and table.concat(entry.argStrs, ", ") or "(no args)"
+        lines[i] = i .. ".  " .. entry.name .. "  (" .. cls .. ")" ..
+                   "\n     " .. entry.path ..
+                   "\n     Args: " .. args
+    end
+    LogParagraph:Set({ Title = "Captured " .. #RemoteLog, Content = table.concat(lines, "\n\n") })
+end
+
+toggleSpy = function()
+    if IsLogging then doStopSpy() else doStartSpy() end
+    if SpyToggle then SpyToggle:Set(IsLogging) end
+end
+
+doCopyResults = function()
+    if #RemoteLog == 0 then Rayfield:Notify({ Title = "Nothing to copy", Content = "Run spy first.", Duration = 2 }); return end
+    local lines = {}
+    for i, entry in ipairs(RemoteLog) do
+        local args = #entry.argStrs > 0 and table.concat(entry.argStrs, ", ") or "(no args)"
+        lines[i] = i .. ". " .. entry.name .. " - " .. entry.path .. " - Args: " .. args
+    end
+    if setclipboard then
+        setclipboard(table.concat(lines, "\n"))
+        Rayfield:Notify({ Title = "Copied", Content = #RemoteLog .. " remote(s)", Duration = 2 })
+    else
+        Rayfield:Notify({ Title = "Error", Content = "setclipboard not available", Duration = 3 })
+    end
+end
+
+SpyTab:CreateButton({ Name = "Copy Results  [C]", Callback = function() if doCopyResults then doCopyResults() end end })
 
 SpyTab:CreateSection("Exclude List")
 
@@ -901,6 +828,115 @@ SpyTab:CreateInput({
 -- // Tab 4 - Settings
 local SettingsTab = Window:CreateTab("Settings", "settings")
 
+SettingsTab:CreateSection("Profiles")
+
+local ProfileDropdown
+local SavedProfilesList = getSavedProfiles()
+
+local function loadProfileData(name)
+    if not name or name == "" or name == "(None)" then return end
+    
+    local ok, raw = pcall(readfile, SavePrefix .. "profile_" .. name .. ".json")
+    if not ok or not raw then 
+        Rayfield:Notify({ Title = "Not found", Content = name, Duration = 2 })
+        return 
+    end
+    if clearAll then clearAll() end
+    local decoded
+    pcall(function() decoded = HttpService:JSONDecode(raw) end)
+    if type(decoded) ~= "table" then return end
+    
+    local entries = decoded
+    if decoded.version == "2" then
+        entries = decoded.hooks
+        if decoded.config then
+            local c = decoded.config
+            local oldInit = IsInitializing
+            IsInitializing = true
+            if c.fireInterval then Config.FireIntervalMs = c.fireInterval; if IntervalInput then IntervalInput:Set(tostring(c.fireInterval)) end end
+            if c.minInterval ~= nil and c.maxInterval ~= nil then
+                Config.MinIntervalMs = c.minInterval
+                Config.MaxIntervalMs = c.maxInterval
+                if JitterInput then JitterInput:Set(c.minInterval .. "-" .. c.maxInterval) end
+            elseif c.minInterval == nil and c.maxInterval == nil then
+                Config.MinIntervalMs = nil
+                Config.MaxIntervalMs = nil
+                if JitterInput then JitterInput:Set("") end
+            end
+            if c.antiAFK ~= nil then Config.AntiAFK = c.antiAFK; if AFKToggle then AFKToggle:Set(c.antiAFK) end end
+            if c.globalKeybinds ~= nil then Config.GlobalKeybinds = c.globalKeybinds; if GlobalKeyToggle then GlobalKeyToggle:Set(c.globalKeybinds) end end
+            if c.showNonFirable ~= nil then Config.ShowNonFirable = c.showNonFirable; if ShowNonFirableToggle then ShowNonFirableToggle:Set(c.showNonFirable) end end
+            IsInitializing = oldInit
+        end
+    end
+    
+    local loaded = 0
+    for _, entry in ipairs(entries) do
+        local parts = string.split(entry.path, ".")
+        local current = game
+        for _, p in ipairs(parts) do
+            current = current:FindFirstChild(p)
+            if not current then break end
+        end
+        if current and isFirable(current) then
+            hookRemote(current, entry.argString or "")
+            if entry.intervalMs then Hooked[current].intervalMs = entry.intervalMs end
+            if entry.burstLimit then Hooked[current].burstLimit = entry.burstLimit end
+            loaded = loaded + 1
+        end
+    end
+    Rayfield:Notify({ Title = "Profile Loaded", Content = name .. " - " .. loaded .. " remote(s)", Duration = 3 })
+    saveHookedRemotes()
+end
+
+ProfileDropdown = SettingsTab:CreateDropdown({
+    Name = "Load Profile",
+    Options = SavedProfilesList,
+    CurrentOption = {SavedProfilesList[1] or "(None)"},
+    MultipleOptions = false,
+    Flag = "ProfileDropdown",
+    Callback = function(Options)
+        local selected = Options[1] or Options
+        loadProfileData(selected)
+    end,
+})
+
+SettingsTab:CreateInput({
+    Name = "Save New Profile",
+    CurrentValue = "",
+    PlaceholderText = "Type a name and press Enter",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(name)
+        if name == "" then return end
+        local hooks = {}
+        for remote, hookData in pairs(Hooked) do
+            if remote and remote.Parent then
+                table.insert(hooks, {
+                    path = fullPath(remote), argString = hookData.argString or "",
+                    intervalMs = hookData.intervalMs, burstLimit = hookData.burstLimit,
+                })
+            end
+        end
+        local payload = {
+            version = "2",
+            hooks = hooks,
+            config = {
+                fireInterval = Config.FireIntervalMs,
+                minInterval = Config.MinIntervalMs,
+                maxInterval = Config.MaxIntervalMs,
+                antiAFK = Config.AntiAFK,
+                globalKeybinds = Config.GlobalKeybinds,
+                showNonFirable = Config.ShowNonFirable
+            }
+        }
+        pcall(writefile, SavePrefix .. "profile_" .. name .. ".json", HttpService:JSONEncode(payload))
+        Rayfield:Notify({ Title = "Profile Saved", Content = name .. " (" .. #hooks .. " remotes + settings)", Duration = 3 })
+        
+        SavedProfilesList = getSavedProfiles()
+        if ProfileDropdown then ProfileDropdown:Refresh(SavedProfilesList) end
+    end,
+})
+
 SettingsTab:CreateSection("Keybinds")
 
 SettingsTab:CreateKeybind({
@@ -909,6 +945,7 @@ SettingsTab:CreateKeybind({
     HoldToInteract = false,
     Flag = "RH_ToggleKey",
     Callback = function()
+        if not Config.GlobalKeybinds and not isUIVisible() then return end
         Config.Enabled = not Config.Enabled
         AutoToggle:Set(Config.Enabled)
         if refreshStatus then refreshStatus() end
@@ -963,7 +1000,15 @@ GlobalKeyToggle = SettingsTab:CreateToggle({
     Name = "Global Keybinds",
     CurrentValue = true,
     Flag = "RGB_GlobalKeybinds",
-    Callback = function(val) Config.GlobalKeybinds = val end,
+    Callback = function(val) 
+        Config.GlobalKeybinds = val
+        if not IsInitializing then saveHookedRemotes() end
+        Rayfield:Notify({
+            Title   = val and "Global Keybinds Enabled" or "Global Keybinds Disabled",
+            Content = val and "Hotkeys now work when UI is closed." or "Hotkeys now only work when UI is open.",
+            Duration = 4,
+        })
+    end,
 })
 
 SettingsTab:CreateSection("General")
@@ -974,6 +1019,7 @@ AFKToggle = SettingsTab:CreateToggle({
     Flag = "RGB_AntiAFK",
     Callback = function(val)
         Config.AntiAFK = val
+        if not IsInitializing then saveHookedRemotes() end
         if val then
             local vu = game:GetService("VirtualUser")
             if not vu then return end
@@ -988,10 +1034,15 @@ AFKToggle = SettingsTab:CreateToggle({
                 vu:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
             end)
             table.insert(Connections, conn)
-            Rayfield:Notify({ Title = "Anti-AFK enabled", Duration = 2 })
+            Rayfield:Notify({ 
+                Title = "Anti-AFK active", 
+                Content = "Idle detection bypassed.",
+                Duration = 2 
+            })
         end
     end,
 })
+
 
 -- // Hook / Unhook
 refreshStatus = function()
@@ -1071,27 +1122,37 @@ clearAll = function()
     TotalFireCount = 0
     HookedDirty = true
     refreshHookedList()
-    Rayfield:Notify({ Title = "Cleared " .. n .. " remote(s)", Duration = 2 })
+    Rayfield:Notify({ 
+        Title = "Cleared " .. n .. " remote(s)", 
+        Content = "Hooks removed successfully.",
+        Duration = 2 
+    })
     saveHookedRemotes()
 end
 
--- // Live Stats
 task.spawn(function()
     local lastCount = 0
     local lastTime  = tick()
+    local lastRateUpdate = tick()
+    local lastUIUpdate = 0
+    local displayRate = 0
 
     while shared.AEH_Running do
-        task.wait(1)
-        local now   = tick()
+        RunService.Heartbeat:Wait()
+        local now = tick()
         if Config.Enabled and HookedCount > 0 then
             ActiveTime = ActiveTime + (now - lastTime)
         end
-        local delta = math.max(0, TotalFireCount - lastCount)
-        local rate  = (now - lastTime) > 0 and (delta / (now - lastTime)) or 0
+        if now - lastRateUpdate >= 1 then
+            local delta = math.max(0, TotalFireCount - lastCount)
+            displayRate = delta / (now - lastRateUpdate)
+            lastCount = TotalFireCount
+            lastRateUpdate = now
+        end
         local timeStr = string.format("%dm %02ds", math.floor(ActiveTime / 60), math.floor(ActiveTime % 60))
 
         local newStats = "Total: " .. formatNumber(TotalFireCount) ..
-                         "  |  " .. string.format("%.1f", rate) .. "/sec" ..
+                         "  |  " .. string.format("%.1f", displayRate) .. "/sec" ..
                          "  |  " .. timeStr
 
         if newStats ~= LastStatsText then
@@ -1099,10 +1160,12 @@ task.spawn(function()
             LastStatsText = newStats
         end
 
-        if HookedDirty then refreshHookedList() end
+        if HookedDirty and now - lastUIUpdate >= 0.1 then
+            refreshHookedList()
+            lastUIUpdate = now
+        end
 
-        lastCount = TotalFireCount
-        lastTime  = now
+        lastTime = now
     end
 end)
 
@@ -1154,7 +1217,7 @@ task.spawn(function()
                     data.fireCount = data.fireCount + 1
                     TotalFireCount = TotalFireCount + 1
                     data.errorCount = 0
-                    if data.fireCount % 100 == 0 then HookedDirty = true end
+                    HookedDirty = true
                 else
                     data.errorCount = (data.errorCount or 0) + 1
                     if data.errorCount >= 10 then
@@ -1181,7 +1244,7 @@ shared.AEH_Cleanup = function()
         local lines = {}
         for i, entry in ipairs(RemoteLog) do
             local args = #entry.argStrs > 0 and table.concat(entry.argStrs, ", ") or "(no args)"
-            lines[i] = i .. ". " .. entry.name .. " - Args: " .. args
+            lines[i] = i .. ". " .. entry.name .. " - " .. entry.path .. " - Args: " .. args
         end
         pcall(setclipboard, table.concat(lines, "\n"))
     end
@@ -1197,4 +1260,28 @@ loadExcludeList()
 refreshExcludeList()
 loadHookedRemotes()
 
-Rayfield:Notify({ Title = "Remote Go Brr v0.1.0", Content = "Loaded successfully.", Duration = 3 })
+IsInitializing = false
+
+-- // Post-init UI sync (force UI to match Config in case Set() was deferred)
+pcall(function() if IntervalInput then IntervalInput:Set(tostring(Config.FireIntervalMs)) end end)
+pcall(function()
+    if JitterInput then
+        if Config.MinIntervalMs and Config.MaxIntervalMs then
+            JitterInput:Set(Config.MinIntervalMs .. "-" .. Config.MaxIntervalMs)
+        else
+            JitterInput:Set("")
+        end
+    end
+end)
+pcall(function() if AutoToggle then AutoToggle:Set(Config.Enabled) end end)
+pcall(function() if AFKToggle then AFKToggle:Set(Config.AntiAFK) end end)
+pcall(function() if GlobalKeyToggle then GlobalKeyToggle:Set(Config.GlobalKeybinds) end end)
+pcall(function() if ShowNonFirableToggle then ShowNonFirableToggle:Set(Config.ShowNonFirable) end end)
+if refreshStatus then refreshStatus() end
+if refreshHookedList then refreshHookedList() end
+
+Rayfield:Notify({ 
+    Title   = "Loading Complete", 
+    Content = HookedCount .. " hooks & settings loaded.", 
+    Duration = 5 
+})
