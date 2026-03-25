@@ -38,7 +38,7 @@ local SavePrefix     = "RemoteGoBrr_" .. game.PlaceId .. "_"
 local OldSavePrefix  = "RemoteHooker_" .. game.PlaceId .. "_"
 local HookedDirty    = true
 local LastStatsText  = ""
-local SessionStart   = tick()
+local ActiveTime     = 0
 local ScanPath       = "ReplicatedStorage.remotes"
 
 -- // Utility
@@ -238,7 +238,11 @@ local Window = Rayfield:CreateWindow({
     LoadingSubtitle = "v0.1.0",
     Theme           = "Default",
     ToggleUIKeybind = Enum.KeyCode.LeftControl,
-    ConfigurationSaving = { Enabled = false },
+    ConfigurationSaving = {
+        Enabled    = true,
+        FolderName = "RemoteGoBrr",
+        FileName   = "UIConfig"
+    },
 })
 
 -- // Tab 1 - Main
@@ -264,6 +268,55 @@ local AutoToggle = MainTab:CreateToggle({
     end,
 })
 
+MainTab:CreateSection("Fire Configuration")
+
+MainTab:CreateInput({
+    Name = "Fire Interval (ms)",
+    CurrentValue = "100",
+    PlaceholderText = "100",
+    RemoveTextAfterFocusLost = false,
+    Flag = "IntervalInput",
+    Callback = function(text)
+        local num = tonumber(text)
+        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
+        num = math.floor(math.max(1, num))
+        Config.FireIntervalMs = num
+        Rayfield:Notify({ Title = num .. "ms  (~" .. string.format("%.0f", 1000/num) .. "/sec)", Duration = 2 })
+    end,
+})
+
+MainTab:CreateInput({
+    Name = "Min Interval (ms)",
+    CurrentValue = "",
+    PlaceholderText = "Leave blank to use Fire Interval",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MinIntervalInput",
+    Callback = function(text)
+        if text == "" then Config.MinIntervalMs = nil; Rayfield:Notify({ Title = "Min Interval cleared", Duration = 2 }); return end
+        local num = tonumber(text)
+        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
+        num = math.floor(math.max(1, num))
+        Config.MinIntervalMs = num
+        Rayfield:Notify({ Title = "Min Interval: " .. num .. "ms", Duration = 2 })
+    end,
+})
+
+MainTab:CreateInput({
+    Name = "Max Interval (ms)",
+    CurrentValue = "",
+    PlaceholderText = "Leave blank to use Fire Interval",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MaxIntervalInput",
+    Callback = function(text)
+        if text == "" then Config.MaxIntervalMs = nil; Rayfield:Notify({ Title = "Max Interval cleared", Duration = 2 }); return end
+        local num = tonumber(text)
+        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
+        num = math.floor(math.max(1, num))
+        Config.MaxIntervalMs = num
+        Rayfield:Notify({ Title = "Max Interval: " .. num .. "ms", Duration = 2 })
+    end,
+})
+
 MainTab:CreateSection("Hooked Remotes")
 
 local HookedParagraph = MainTab:CreateParagraph({ Title = "Hooked (0)", Content = "None yet. Use Browse or Spy tab." })
@@ -272,37 +325,166 @@ MainTab:CreateButton({ Name = "Clear All  [X]", Callback = function() if clearAl
 
 MainTab:CreateSection("Remote Actions")
 
-MainTab:CreateInput({
-    Name = "Unhook by name or index",
-    CurrentValue = "",
-    PlaceholderText = "name or index number",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(text)
-        if text == "" then return end
-        local remote = resolveHookedRemote(text)
-        if remote then
-            unhookRemote(remote)
-        else
-            Rayfield:Notify({ Title = "Not hooked", Content = text, Duration = 2 })
-        end
-    end,
+local MainActionType = "Unhook"
+MainTab:CreateDropdown({
+    Name = "Action Type",
+    Options = {"Unhook", "Pause/Resume"},
+    CurrentOption = {"Unhook"},
+    MultipleOptions = false,
+    Flag = "MainActionDropdown",
+    Callback = function(Options) MainActionType = Options[1] or Options end,
 })
 
 MainTab:CreateInput({
-    Name = "Pause/Resume by name or index",
+    Name = "Remote",
     CurrentValue = "",
     PlaceholderText = "name or index number",
     RemoveTextAfterFocusLost = true,
     Callback = function(text)
         if text == "" then return end
         local remote, data = resolveHookedRemote(text)
-        if remote and data then
-            data.paused = not data.paused
-            HookedDirty = true
-            if refreshHookedList then refreshHookedList() end
-            Rayfield:Notify({ Title = data.paused and "Paused" or "Resumed", Content = remote.Name, Duration = 2 })
-        else
+        if not remote then
             Rayfield:Notify({ Title = "Not hooked", Content = text, Duration = 2 })
+            return
+        end
+        if MainActionType == "Unhook" then
+            unhookRemote(remote)
+        elseif MainActionType == "Pause/Resume" then
+            if data then
+                data.paused = not data.paused
+                HookedDirty = true
+                if refreshHookedList then refreshHookedList() end
+                Rayfield:Notify({ Title = data.paused and "Paused" or "Resumed", Content = remote.Name, Duration = 2 })
+            end
+        end
+    end,
+})
+
+MainTab:CreateSection("Per-Remote Tuning")
+
+local TuneRemoteField = ""
+local TuneActionType = "Set Arguments"
+
+MainTab:CreateInput({
+    Name = "Remote",
+    CurrentValue = "",
+    PlaceholderText = "name or index number",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text) TuneRemoteField = text end,
+})
+
+MainTab:CreateDropdown({
+    Name = "Setting to Change",
+    Options = {"Set Arguments", "Set Interval (ms)", "Set Burst Limit"},
+    CurrentOption = {"Set Arguments"},
+    MultipleOptions = false,
+    Flag = "TuneActionDropdown",
+    Callback = function(Options) TuneActionType = Options[1] or Options end,
+})
+
+MainTab:CreateInput({
+    Name = "Value",
+    CurrentValue = "",
+    PlaceholderText = "e.g. 33 or false,1",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(text)
+        if TuneRemoteField == "" then
+            Rayfield:Notify({ Title = "Error", Content = "Set target remote first.", Duration = 2 })
+            return
+        end
+        local targetRemote, _ = resolveHookedRemote(TuneRemoteField)
+        if not targetRemote then
+            Rayfield:Notify({ Title = "Not hooked", Content = TuneRemoteField, Duration = 2 })
+            return
+        end
+        local data = Hooked[targetRemote]
+        if TuneActionType == "Set Arguments" then
+            data.argString = text
+            data.args = parseArgs(text)
+            HookedDirty = true
+            saveHookedRemotes()
+            Rayfield:Notify({ Title = "Args set", Content = targetRemote.Name .. " = " .. (text == "" and "(none)" or text), Duration = 2 })
+        elseif TuneActionType == "Set Interval (ms)" then
+            local ms = tonumber(text)
+            if ms then
+                data.intervalMs = ms
+                HookedDirty = true
+                saveHookedRemotes()
+                Rayfield:Notify({ Title = "Interval set", Content = targetRemote.Name .. " @ " .. ms .. "ms", Duration = 2 })
+            else
+                Rayfield:Notify({ Title = "Error", Content = "Must be a number", Duration = 2 })
+            end
+        elseif TuneActionType == "Set Burst Limit" then
+            local limit = tonumber(text)
+            if limit then
+                data.burstLimit = limit
+                data.burstNotified = false
+                data.fireCount = 0
+                HookedDirty = true
+                saveHookedRemotes()
+                Rayfield:Notify({ Title = "Burst set", Content = targetRemote.Name .. " limit " .. limit, Duration = 2 })
+            else
+                Rayfield:Notify({ Title = "Error", Content = "Must be a number", Duration = 2 })
+            end
+        end
+    end,
+})
+
+MainTab:CreateSection("Profiles")
+
+local ProfileActionType = "Load"
+
+MainTab:CreateDropdown({
+    Name = "Action Type",
+    Options = {"Load", "Save"},
+    CurrentOption = {"Load"},
+    MultipleOptions = false,
+    Flag = "ProfileActionDropdown",
+    Callback = function(Options) ProfileActionType = Options[1] or Options end,
+})
+
+MainTab:CreateInput({
+    Name = "Profile Name",
+    CurrentValue = "",
+    PlaceholderText = "e.g. xp_farm",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(name)
+        if name == "" then return end
+        if ProfileActionType == "Save" then
+            local data = {}
+            for remote, hookData in pairs(Hooked) do
+                if remote and remote.Parent then
+                    table.insert(data, {
+                        path = fullPath(remote), argString = hookData.argString or "",
+                        intervalMs = hookData.intervalMs, burstLimit = hookData.burstLimit,
+                    })
+                end
+            end
+            pcall(writefile, SavePrefix .. "profile_" .. name .. ".json", HttpService:JSONEncode(data))
+            Rayfield:Notify({ Title = "Profile Saved", Content = name .. " (" .. #data .. " remotes)", Duration = 3 })
+        else
+            local ok, raw = pcall(readfile, SavePrefix .. "profile_" .. name .. ".json")
+            if not ok or not raw then Rayfield:Notify({ Title = "Not found", Content = name, Duration = 2 }); return end
+            if clearAll then clearAll() end
+            local decoded
+            pcall(function() decoded = HttpService:JSONDecode(raw) end)
+            if type(decoded) ~= "table" then return end
+            local loaded = 0
+            for _, entry in ipairs(decoded) do
+                local parts = string.split(entry.path, ".")
+                local current = game
+                for _, p in ipairs(parts) do
+                    current = current:FindFirstChild(p)
+                    if not current then break end
+                end
+                if current and isFirable(current) then
+                    hookRemote(current, entry.argString or "")
+                    if entry.intervalMs then Hooked[current].intervalMs = entry.intervalMs end
+                    if entry.burstLimit then Hooked[current].burstLimit = entry.burstLimit end
+                    loaded = loaded + 1
+                end
+            end
+            Rayfield:Notify({ Title = "Profile Loaded", Content = name .. " - " .. loaded .. " remote(s)", Duration = 3 })
         end
     end,
 })
@@ -311,6 +493,13 @@ MainTab:CreateInput({
 local BrowseTab = Window:CreateTab("Browse", "folder")
 
 BrowseTab:CreateSection("Scan")
+
+BrowseTab:CreateToggle({
+    Name = "Show non-firable remotes in scan",
+    CurrentValue = false,
+    Flag = "RGB_ShowNonFirable",
+    Callback = function(val) Config.ShowNonFirable = val end,
+})
 
 BrowseTab:CreateInput({
     Name = "Scan Path",
@@ -384,7 +573,7 @@ BrowseTab:CreateButton({ Name = "Full Game Scan", Callback = function() if doSca
 BrowseTab:CreateSection("Hook from List")
 
 BrowseTab:CreateInput({
-    Name = "Hook by index",
+    Name = "Remote",
     CurrentValue = "",
     PlaceholderText = "1  or  1,3  or  all",
     RemoveTextAfterFocusLost = true,
@@ -426,7 +615,7 @@ BrowseTab:CreateDropdown({
 })
 
 BrowseTab:CreateInput({
-    Name = "Remote Name",
+    Name = "Remote",
     CurrentValue = "",
     PlaceholderText = "e.g. click_xp",
     RemoveTextAfterFocusLost = true,
@@ -557,7 +746,7 @@ SpyTab:CreateButton({ Name = "Copy Results  [C]", Callback = function() if doCop
 SpyTab:CreateSection("Hook from Spy Results")
 
 SpyTab:CreateInput({
-    Name = "Hook from results",
+    Name = "Remote",
     CurrentValue = "",
     PlaceholderText = "1  or  1,3  or  all",
     RemoveTextAfterFocusLost = true,
@@ -599,106 +788,39 @@ refreshExcludeList = function()
     })
 end
 
-SpyTab:CreateInput({
-    Name = "Add to exclude", CurrentValue = "", PlaceholderText = "e.g. Received",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(text)
-        if text == "" then return end
-        ExcludeList[text] = true
-        refreshExcludeList()
-        saveExcludeList()
-    end,
+local ExcludeActionType = "Add"
+SpyTab:CreateDropdown({
+    Name = "Action Type",
+    Options = {"Add", "Remove"},
+    CurrentOption = {"Add"},
+    MultipleOptions = false,
+    Flag = "ExcludeActionDropdown",
+    Callback = function(Options) ExcludeActionType = Options[1] or Options end,
 })
 
 SpyTab:CreateInput({
-    Name = "Remove from exclude", CurrentValue = "", PlaceholderText = "e.g. Received",
+    Name = "Name",
+    CurrentValue = "",
+    PlaceholderText = "e.g. Received",
     RemoveTextAfterFocusLost = true,
     Callback = function(text)
         if text == "" then return end
-        if ExcludeList[text] then
-            ExcludeList[text] = nil
+        if ExcludeActionType == "Add" then
+            ExcludeList[text] = true
             refreshExcludeList()
             saveExcludeList()
+        elseif ExcludeActionType == "Remove" then
+            if ExcludeList[text] then
+                ExcludeList[text] = nil
+                refreshExcludeList()
+                saveExcludeList()
+            end
         end
     end,
 })
 
 -- // Tab 4 - Settings
 local SettingsTab = Window:CreateTab("Settings", "settings")
-
-SettingsTab:CreateSection("Fire Configuration")
-
-SettingsTab:CreateInput({
-    Name = "Fire Interval (ms)",
-    CurrentValue = "100",
-    PlaceholderText = "100",
-    RemoveTextAfterFocusLost = false,
-    Flag = "IntervalInput",
-    Callback = function(text)
-        local num = tonumber(text)
-        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
-        num = math.floor(math.max(1, num))
-        Config.FireIntervalMs = num
-        Rayfield:Notify({ Title = num .. "ms  (~" .. string.format("%.0f", 1000/num) .. "/sec)", Duration = 2 })
-    end,
-})
-
-SettingsTab:CreateInput({
-    Name = "Min Interval (ms)",
-    CurrentValue = "",
-    PlaceholderText = "Leave blank to use Fire Interval",
-    RemoveTextAfterFocusLost = false,
-    Flag = "MinIntervalInput",
-    Callback = function(text)
-        if text == "" then Config.MinIntervalMs = nil; Rayfield:Notify({ Title = "Min Interval cleared", Duration = 2 }); return end
-        local num = tonumber(text)
-        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
-        num = math.floor(math.max(1, num))
-        Config.MinIntervalMs = num
-        Rayfield:Notify({ Title = "Min Interval: " .. num .. "ms", Duration = 2 })
-    end,
-})
-
-SettingsTab:CreateInput({
-    Name = "Max Interval (ms)",
-    CurrentValue = "",
-    PlaceholderText = "Leave blank to use Fire Interval",
-    RemoveTextAfterFocusLost = false,
-    Flag = "MaxIntervalInput",
-    Callback = function(text)
-        if text == "" then Config.MaxIntervalMs = nil; Rayfield:Notify({ Title = "Max Interval cleared", Duration = 2 }); return end
-        local num = tonumber(text)
-        if not num then Rayfield:Notify({ Title = "Error", Content = "Enter a number", Duration = 2 }); return end
-        num = math.floor(math.max(1, num))
-        Config.MaxIntervalMs = num
-        Rayfield:Notify({ Title = "Max Interval: " .. num .. "ms", Duration = 2 })
-    end,
-})
-
-SettingsTab:CreateToggle({
-    Name = "Anti-AFK",
-    CurrentValue = false,
-    Flag = "RGB_AntiAFK",
-    Callback = function(val)
-        Config.AntiAFK = val
-        if val then
-            local vu = game:GetService("VirtualUser")
-            if not vu then return end
-            local conn
-            conn = Players.LocalPlayer.Idled:Connect(function()
-                if not shared.AEH_Running or not Config.AntiAFK then
-                    if conn then conn:Disconnect() end
-                    return
-                end
-                vu:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
-                task.wait(0.1)
-                vu:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
-            end)
-            table.insert(Connections, conn)
-            Rayfield:Notify({ Title = "Anti-AFK enabled", Duration = 2 })
-        end
-    end,
-})
 
 SettingsTab:CreateSection("Keybinds")
 
@@ -765,140 +887,29 @@ SettingsTab:CreateToggle({
     Callback = function(val) Config.GlobalKeybinds = val end,
 })
 
-SettingsTab:CreateSection("Browse Settings")
+SettingsTab:CreateSection("General")
 
 SettingsTab:CreateToggle({
-    Name = "Show non-firable remotes in scan",
+    Name = "Anti-AFK",
     CurrentValue = false,
-    Flag = "RGB_ShowNonFirable",
-    Callback = function(val) Config.ShowNonFirable = val end,
-})
-
-SettingsTab:CreateSection("Per-Remote Tuning")
-
-local TuneRemoteField = ""
-local TuneActionType = "Set Arguments"
-
-SettingsTab:CreateInput({
-    Name = "Target Remote (name or index)",
-    CurrentValue = "",
-    PlaceholderText = "name or index number",
-    RemoveTextAfterFocusLost = false,
-    Callback = function(text) TuneRemoteField = text end,
-})
-
-SettingsTab:CreateDropdown({
-    Name = "Setting to Change",
-    Options = {"Set Arguments", "Set Interval (ms)", "Set Burst Limit"},
-    CurrentOption = {"Set Arguments"},
-    MultipleOptions = false,
-    Flag = "TuneActionDropdown",
-    Callback = function(Options) TuneActionType = Options[1] or Options end,
-})
-
-SettingsTab:CreateInput({
-    Name = "Value",
-    CurrentValue = "",
-    PlaceholderText = "e.g. 33 or false,1",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(text)
-        if TuneRemoteField == "" then
-            Rayfield:Notify({ Title = "Error", Content = "Set target remote first.", Duration = 2 })
-            return
-        end
-        local targetRemote, _ = resolveHookedRemote(TuneRemoteField)
-        if not targetRemote then
-            Rayfield:Notify({ Title = "Not hooked", Content = TuneRemoteField, Duration = 2 })
-            return
-        end
-        local data = Hooked[targetRemote]
-        if TuneActionType == "Set Arguments" then
-            data.argString = text
-            data.args = parseArgs(text)
-            HookedDirty = true
-            saveHookedRemotes()
-            Rayfield:Notify({ Title = "Args set", Content = targetRemote.Name .. " = " .. (text == "" and "(none)" or text), Duration = 2 })
-        elseif TuneActionType == "Set Interval (ms)" then
-            local ms = tonumber(text)
-            if ms then
-                data.intervalMs = ms
-                HookedDirty = true
-                saveHookedRemotes()
-                Rayfield:Notify({ Title = "Interval set", Content = targetRemote.Name .. " @ " .. ms .. "ms", Duration = 2 })
-            else
-                Rayfield:Notify({ Title = "Error", Content = "Must be a number", Duration = 2 })
-            end
-        elseif TuneActionType == "Set Burst Limit" then
-            local limit = tonumber(text)
-            if limit then
-                data.burstLimit = limit
-                data.burstNotified = false
-                data.fireCount = 0
-                HookedDirty = true
-                saveHookedRemotes()
-                Rayfield:Notify({ Title = "Burst set", Content = targetRemote.Name .. " limit " .. limit, Duration = 2 })
-            else
-                Rayfield:Notify({ Title = "Error", Content = "Must be a number", Duration = 2 })
-            end
-        end
-    end,
-})
-
-SettingsTab:CreateSection("Profiles")
-
-local ProfileActionType = "Load"
-
-SettingsTab:CreateDropdown({
-    Name = "Profile Action",
-    Options = {"Load", "Save"},
-    CurrentOption = {"Load"},
-    MultipleOptions = false,
-    Flag = "ProfileActionDropdown",
-    Callback = function(Options) ProfileActionType = Options[1] or Options end,
-})
-
-SettingsTab:CreateInput({
-    Name = "Profile Name",
-    CurrentValue = "",
-    PlaceholderText = "e.g. xp_farm",
-    RemoveTextAfterFocusLost = true,
-    Callback = function(name)
-        if name == "" then return end
-        if ProfileActionType == "Save" then
-            local data = {}
-            for remote, hookData in pairs(Hooked) do
-                if remote and remote.Parent then
-                    table.insert(data, {
-                        path = fullPath(remote), argString = hookData.argString or "",
-                        intervalMs = hookData.intervalMs, burstLimit = hookData.burstLimit,
-                    })
+    Flag = "RGB_AntiAFK",
+    Callback = function(val)
+        Config.AntiAFK = val
+        if val then
+            local vu = game:GetService("VirtualUser")
+            if not vu then return end
+            local conn
+            conn = Players.LocalPlayer.Idled:Connect(function()
+                if not shared.AEH_Running or not Config.AntiAFK then
+                    if conn then conn:Disconnect() end
+                    return
                 end
-            end
-            pcall(writefile, SavePrefix .. "profile_" .. name .. ".json", HttpService:JSONEncode(data))
-            Rayfield:Notify({ Title = "Profile Saved", Content = name .. " (" .. #data .. " remotes)", Duration = 3 })
-        else
-            local ok, raw = pcall(readfile, SavePrefix .. "profile_" .. name .. ".json")
-            if not ok or not raw then Rayfield:Notify({ Title = "Not found", Content = name, Duration = 2 }); return end
-            if clearAll then clearAll() end
-            local decoded
-            pcall(function() decoded = HttpService:JSONDecode(raw) end)
-            if type(decoded) ~= "table" then return end
-            local loaded = 0
-            for _, entry in ipairs(decoded) do
-                local parts = string.split(entry.path, ".")
-                local current = game
-                for _, p in ipairs(parts) do
-                    current = current:FindFirstChild(p)
-                    if not current then break end
-                end
-                if current and isFirable(current) then
-                    hookRemote(current, entry.argString or "")
-                    if entry.intervalMs then Hooked[current].intervalMs = entry.intervalMs end
-                    if entry.burstLimit then Hooked[current].burstLimit = entry.burstLimit end
-                    loaded = loaded + 1
-                end
-            end
-            Rayfield:Notify({ Title = "Profile Loaded", Content = name .. " - " .. loaded .. " remote(s)", Duration = 3 })
+                vu:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+                task.wait(0.1)
+                vu:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+            end)
+            table.insert(Connections, conn)
+            Rayfield:Notify({ Title = "Anti-AFK enabled", Duration = 2 })
         end
     end,
 })
@@ -993,10 +1004,12 @@ task.spawn(function()
     while shared.AEH_Running do
         task.wait(1)
         local now   = tick()
+        if Config.Enabled and HookedCount > 0 then
+            ActiveTime = ActiveTime + (now - lastTime)
+        end
         local delta = math.max(0, TotalFireCount - lastCount)
         local rate  = (now - lastTime) > 0 and (delta / (now - lastTime)) or 0
-        local elapsed = now - SessionStart
-        local timeStr = string.format("%dm %02ds", math.floor(elapsed / 60), math.floor(elapsed % 60))
+        local timeStr = string.format("%dm %02ds", math.floor(ActiveTime / 60), math.floor(ActiveTime % 60))
 
         local newStats = "Total: " .. formatNumber(TotalFireCount) ..
                          "  |  " .. string.format("%.1f", rate) .. "/sec" ..
