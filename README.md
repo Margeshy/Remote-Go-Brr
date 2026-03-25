@@ -61,7 +61,7 @@ All keybinds work globally by default. Disable "Global Keybinds" in Settings to 
 ### Profiles
 
 - **Save**: Select "Save" from the dropdown, type a name, and press Enter. 
-- **Load**: Select the profile from the dropdown in the Settings tab. It will automatically load all hooks and settings instantly.
+- **Load**: Select the profile from the dropdown in the Settings tab. It will automatically load settings & hooked remotes upon rejoining.
 - **Storage**: Profiles are stored in your executor's `workspace/RemoteGoBrr/` folder using the format: `[PlaceID]_profile_[Name].json`.
 
 ### Random Range (Jitter)
