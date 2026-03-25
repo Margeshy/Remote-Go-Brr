@@ -1262,7 +1262,7 @@ loadHookedRemotes()
 
 IsInitializing = false
 
--- // Post-init UI sync (force UI to match Config in case Set() was deferred)
+-- // Post-init UI sync
 pcall(function() if IntervalInput then IntervalInput:Set(tostring(Config.FireIntervalMs)) end end)
 pcall(function()
     if JitterInput then
