@@ -19,7 +19,7 @@ A Roblox remote event auto-fire tool with a built-in remote spy, scanner, and pe
 Paste into your executor:
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Margeshy/Remote-Go-Brr/refs/heads/main/Remote_Go_Brr.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Margeshy/RemoteGoBrr/refs/heads/main/Remote_Go_Brr.lua"))()
 ```
 
 Or load the file directly if your executor supports `dofile`.
