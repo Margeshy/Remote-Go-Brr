@@ -34,12 +34,17 @@ local RemoteLog      = {}
 local ExcludeList    = {}
 local SpyHookActive  = shared.AEH_SpyHookActive or false
 local BrowseResults  = {}
-local SavePrefix     = "RemoteGoBrr_" .. game.PlaceId .. "_"
-local OldSavePrefix  = "RemoteHooker_" .. game.PlaceId .. "_"
+local SavePrefix     = "RemoteGoBrr/" .. game.PlaceId .. "_"
+local OldSavePrefix  = "RemoteHooker/" .. game.PlaceId .. "_"
+local LegacyPrefix   = "RemoteGoBrr_" .. game.PlaceId .. "_"
+local LegacyOld      = "RemoteHooker_" .. game.PlaceId .. "_"
 local HookedDirty    = true
 local LastStatsText  = ""
 local ActiveTime     = 0
 local ScanPath       = "ReplicatedStorage.remotes"
+
+-- // Folder Check
+if makefolder then pcall(makefolder, "RemoteGoBrr") pcall(makefolder, "RemoteHooker") end
 
 -- // Utility
 local function formatNumber(n)
@@ -103,10 +108,10 @@ end
 -- // Save / Load
 local function saveHookedRemotes()
     if not writefile then return end
-    local data = {}
+    local hooks = {}
     for remote, hookData in pairs(Hooked) do
         if remote and remote.Parent then
-            table.insert(data, {
+            table.insert(hooks, {
                 path       = fullPath(remote),
                 argString  = hookData.argString or "",
                 intervalMs = hookData.intervalMs,
@@ -114,7 +119,20 @@ local function saveHookedRemotes()
             })
         end
     end
-    pcall(writefile, SavePrefix .. "hooked.json", HttpService:JSONEncode(data))
+    
+    local payload = {
+        version = "2",
+        hooks = hooks,
+        config = {
+            fireInterval = Config.FireIntervalMs,
+            minInterval = Config.MinIntervalMs,
+            maxInterval = Config.MaxIntervalMs,
+            antiAFK = Config.AntiAFK,
+            globalKeybinds = Config.GlobalKeybinds,
+            showNonFirable = Config.ShowNonFirable
+        }
+    }
+    pcall(writefile, SavePrefix .. "hooked.json", HttpService:JSONEncode(payload))
 end
 
 local function saveExcludeList()
@@ -135,17 +153,37 @@ local function loadHookedRemotes()
     if not readfile then return end
     local ok, raw = pcall(readfile, SavePrefix .. "hooked.json")
     if not ok or not raw or raw == "" then
-        ok, raw = pcall(readfile, OldSavePrefix .. "hooked.json")
-        if not ok or not raw or raw == "" then return end
+        ok, raw = pcall(readfile, LegacyPrefix .. "hooked.json")
+        if not ok or not raw or raw == "" then
+            ok, raw = pcall(readfile, OldSavePrefix .. "hooked.json")
+            if not ok or not raw or raw == "" then
+                ok, raw = pcall(readfile, LegacyOld .. "hooked.json")
+                if not ok or not raw or raw == "" then return end
+            end
+        end
         task.defer(saveHookedRemotes)
     end
     local decoded
     local ok2 = pcall(function() decoded = HttpService:JSONDecode(raw) end)
     if not ok2 or not decoded then return end
 
+    local entries = decoded
+    if type(decoded) == "table" and decoded.version == "2" then
+        entries = decoded.hooks
+        if decoded.config then
+            local c = decoded.config
+            if c.fireInterval then Config.FireIntervalMs = c.fireInterval; if IntervalInput then IntervalInput:Set(tostring(c.fireInterval)) end end
+            if c.minInterval ~= nil then Config.MinIntervalMs = c.minInterval; if MinIntervalInput then MinIntervalInput:Set(tostring(c.minInterval or "")) end end
+            if c.maxInterval ~= nil then Config.MaxIntervalMs = c.maxInterval; if MaxIntervalInput then MaxIntervalInput:Set(tostring(c.maxInterval or "")) end end
+            if c.antiAFK ~= nil then Config.AntiAFK = c.antiAFK; if AFKToggle then AFKToggle:Set(c.antiAFK) end end
+            if c.globalKeybinds ~= nil then Config.GlobalKeybinds = c.globalKeybinds; if GlobalKeyToggle then GlobalKeyToggle:Set(c.globalKeybinds) end end
+            if c.showNonFirable ~= nil then Config.ShowNonFirable = c.showNonFirable; if ShowNonFirableToggle then ShowNonFirableToggle:Set(c.showNonFirable) end end
+        end
+    end
+
     local loaded = 0
     local failed = {}
-    for _, entry in ipairs(decoded) do
+    for _, entry in ipairs(entries) do
         local parts = string.split(entry.path, ".")
         local current = game
         local valid = true
@@ -204,8 +242,14 @@ local function loadExcludeList()
     if not readfile then return end
     local ok, raw = pcall(readfile, SavePrefix .. "exclude.json")
     if not ok or not raw or raw == "" then
-        ok, raw = pcall(readfile, OldSavePrefix .. "exclude.json")
-        if not ok or not raw or raw == "" then return end
+        ok, raw = pcall(readfile, LegacyPrefix .. "exclude.json")
+        if not ok or not raw or raw == "" then
+            ok, raw = pcall(readfile, OldSavePrefix .. "exclude.json")
+            if not ok or not raw or raw == "" then
+                ok, raw = pcall(readfile, LegacyOld .. "exclude.json")
+                if not ok or not raw or raw == "" then return end
+            end
+        end
         task.defer(saveExcludeList)
     end
     local ok2, decoded = pcall(function() return HttpService:JSONDecode(raw) end)
@@ -253,7 +297,9 @@ MainTab:CreateSection("Status")
 local StatusLabel = MainTab:CreateParagraph({ Title = "Engine", Content = "OFF  |  0 hooked" })
 local StatsLabel = MainTab:CreateParagraph({ Title = "Stats", Content = "Total: 0  |  0/sec" })
 
-local AutoToggle = MainTab:CreateToggle({
+local AutoToggle, IntervalInput, MinIntervalInput, MaxIntervalInput, AFKToggle, GlobalKeyToggle, ShowNonFirableToggle
+
+AutoToggle = MainTab:CreateToggle({
     Name = "Enable Auto-Fire  [F]",
     CurrentValue = false,
     Flag = "RH_Enabled",
@@ -270,7 +316,7 @@ local AutoToggle = MainTab:CreateToggle({
 
 MainTab:CreateSection("Fire Configuration")
 
-MainTab:CreateInput({
+IntervalInput = MainTab:CreateInput({
     Name = "Fire Interval (ms)",
     CurrentValue = "100",
     PlaceholderText = "100",
@@ -285,7 +331,7 @@ MainTab:CreateInput({
     end,
 })
 
-MainTab:CreateInput({
+MinIntervalInput = MainTab:CreateInput({
     Name = "Min Interval (ms)",
     CurrentValue = "",
     PlaceholderText = "Leave blank to use Fire Interval",
@@ -301,7 +347,7 @@ MainTab:CreateInput({
     end,
 })
 
-MainTab:CreateInput({
+MaxIntervalInput = MainTab:CreateInput({
     Name = "Max Interval (ms)",
     CurrentValue = "",
     PlaceholderText = "Leave blank to use Fire Interval",
@@ -451,26 +497,59 @@ MainTab:CreateInput({
     Callback = function(name)
         if name == "" then return end
         if ProfileActionType == "Save" then
-            local data = {}
+            local hooks = {}
             for remote, hookData in pairs(Hooked) do
                 if remote and remote.Parent then
-                    table.insert(data, {
+                    table.insert(hooks, {
                         path = fullPath(remote), argString = hookData.argString or "",
                         intervalMs = hookData.intervalMs, burstLimit = hookData.burstLimit,
                     })
                 end
             end
-            pcall(writefile, SavePrefix .. "profile_" .. name .. ".json", HttpService:JSONEncode(data))
-            Rayfield:Notify({ Title = "Profile Saved", Content = name .. " (" .. #data .. " remotes)", Duration = 3 })
+            local payload = {
+                version = "2",
+                hooks = hooks,
+                config = {
+                    fireInterval = Config.FireIntervalMs,
+                    minInterval = Config.MinIntervalMs,
+                    maxInterval = Config.MaxIntervalMs,
+                    antiAFK = Config.AntiAFK,
+                    globalKeybinds = Config.GlobalKeybinds,
+                    showNonFirable = Config.ShowNonFirable
+                }
+            }
+            pcall(writefile, SavePrefix .. "profile_" .. name .. ".json", HttpService:JSONEncode(payload))
+            Rayfield:Notify({ Title = "Profile Saved", Content = name .. " (" .. #hooks .. " remotes + settings)", Duration = 3 })
         else
             local ok, raw = pcall(readfile, SavePrefix .. "profile_" .. name .. ".json")
-            if not ok or not raw then Rayfield:Notify({ Title = "Not found", Content = name, Duration = 2 }); return end
+            if not ok or not raw then 
+                ok, raw = pcall(readfile, LegacyPrefix .. "profile_" .. name .. ".json")
+                if not ok or not raw then
+                    Rayfield:Notify({ Title = "Not found", Content = name, Duration = 2 })
+                    return 
+                end
+            end
             if clearAll then clearAll() end
             local decoded
             pcall(function() decoded = HttpService:JSONDecode(raw) end)
             if type(decoded) ~= "table" then return end
+            
+            local entries = decoded
+            if decoded.version == "2" then
+                entries = decoded.hooks
+                if decoded.config then
+                    local c = decoded.config
+                    if c.fireInterval then Config.FireIntervalMs = c.fireInterval; if IntervalInput then IntervalInput:Set(tostring(c.fireInterval)) end end
+                    if c.minInterval ~= nil then Config.MinIntervalMs = c.minInterval; if MinIntervalInput then MinIntervalInput:Set(tostring(c.minInterval or "")) end end
+                    if c.maxInterval ~= nil then Config.MaxIntervalMs = c.maxInterval; if MaxIntervalInput then MaxIntervalInput:Set(tostring(c.maxInterval or "")) end end
+                    if c.antiAFK ~= nil then Config.AntiAFK = c.antiAFK; if AFKToggle then AFKToggle:Set(c.antiAFK) end end
+                    if c.globalKeybinds ~= nil then Config.GlobalKeybinds = c.globalKeybinds; if GlobalKeyToggle then GlobalKeyToggle:Set(c.globalKeybinds) end end
+                    if c.showNonFirable ~= nil then Config.ShowNonFirable = c.showNonFirable; if ShowNonFirableToggle then ShowNonFirableToggle:Set(c.showNonFirable) end end
+                end
+            end
+            
             local loaded = 0
-            for _, entry in ipairs(decoded) do
+            for _, entry in ipairs(entries) do
                 local parts = string.split(entry.path, ".")
                 local current = game
                 for _, p in ipairs(parts) do
@@ -494,7 +573,7 @@ local BrowseTab = Window:CreateTab("Browse", "folder")
 
 BrowseTab:CreateSection("Scan")
 
-BrowseTab:CreateToggle({
+ShowNonFirableToggle = BrowseTab:CreateToggle({
     Name = "Show non-firable remotes in scan",
     CurrentValue = false,
     Flag = "RGB_ShowNonFirable",
@@ -880,7 +959,7 @@ SettingsTab:CreateKeybind({
     end,
 })
 
-SettingsTab:CreateToggle({
+GlobalKeyToggle = SettingsTab:CreateToggle({
     Name = "Global Keybinds",
     CurrentValue = true,
     Flag = "RGB_GlobalKeybinds",
@@ -889,7 +968,7 @@ SettingsTab:CreateToggle({
 
 SettingsTab:CreateSection("General")
 
-SettingsTab:CreateToggle({
+AFKToggle = SettingsTab:CreateToggle({
     Name = "Anti-AFK",
     CurrentValue = false,
     Flag = "RGB_AntiAFK",
