@@ -1,6 +1,8 @@
--- Remote Go Brr v0.1.0
+-- Remote Go Brr v0.2.0
 if shared.AEH_Cleanup then pcall(shared.AEH_Cleanup) end
 shared.AEH_Running = true
+local SessionId = tick()
+shared.AEH_SessionId = SessionId
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -26,6 +28,9 @@ local Config = {
     MaxIntervalMs  = nil,
     AntiAFK        = false,
     ShowNonFirable = false,
+    AutoSave       = true,
+    HideCursor     = false,
+    ToggleUIKey    = "LeftControl",
 }
 
 local Connections    = {}
@@ -42,6 +47,8 @@ local HookedDirty    = true
 local LastStatsText  = ""
 local ActiveTime     = 0
 local ScanPath       = "ReplicatedStorage"
+local IsAutoFiring   = false
+local CDLog          = {}
 
 if makefolder then pcall(makefolder, "RemoteGoBrr") end
 
@@ -106,7 +113,7 @@ end
 
 -- // Save / Load
 local function saveHookedRemotes()
-    if not writefile or IsInitializing then return end
+    if not writefile or IsInitializing or not Config.AutoSave then return end
     local hooks = {}
     for remote, hookData in pairs(Hooked) do
         if remote and remote.Parent then
@@ -128,7 +135,10 @@ local function saveHookedRemotes()
             maxInterval = Config.MaxIntervalMs,
             antiAFK = Config.AntiAFK,
             globalKeybinds = Config.GlobalKeybinds,
-            showNonFirable = Config.ShowNonFirable
+            showNonFirable = Config.ShowNonFirable,
+            autoSave = Config.AutoSave,
+            hideCursor = Config.HideCursor,
+            toggleUIKey = Config.ToggleUIKey
         }
     }
     pcall(writefile, SavePrefix .. "hooked.json", HttpService:JSONEncode(payload))
@@ -146,6 +156,7 @@ local hookRemote, unhookRemote, clearAll
 local refreshHookedList, refreshStatus
 local refreshExcludeList
 local doScanRemotes, doStartSpy, doStopSpy, toggleSpy, doCopyResults
+local AutoSaveToggle, HideCursorToggle
 
 -- // Load Functions
 local function loadHookedRemotes()
@@ -176,6 +187,8 @@ local function loadHookedRemotes()
             if c.antiAFK ~= nil then Config.AntiAFK = c.antiAFK; if AFKToggle then AFKToggle:Set(c.antiAFK) end end
             if c.globalKeybinds ~= nil then Config.GlobalKeybinds = c.globalKeybinds; if GlobalKeyToggle then GlobalKeyToggle:Set(c.globalKeybinds) end end
             if c.showNonFirable ~= nil then Config.ShowNonFirable = c.showNonFirable; if ShowNonFirableToggle then ShowNonFirableToggle:Set(c.showNonFirable) end end
+            if c.autoSave ~= nil then Config.AutoSave = c.autoSave; if AutoSaveToggle then AutoSaveToggle:Set(c.autoSave) end end
+            if c.hideCursor ~= nil then Config.HideCursor = c.hideCursor; if HideCursorToggle then HideCursorToggle:Set(c.hideCursor) end; pcall(function() game:GetService("UserInputService").MouseIconEnabled = not c.hideCursor end) end
             IsInitializing = oldInit
         end
     end
@@ -278,14 +291,29 @@ local function getSavedProfiles()
     return names
 end
 
+-- // Pre-load UI keybind before Window creation
+do
+    if readfile then
+        local ok, raw = pcall(readfile, SavePrefix .. "hooked.json")
+        if ok and raw and raw ~= "" then
+            pcall(function()
+                local d = HttpService:JSONDecode(raw)
+                if d and d.config and d.config.toggleUIKey then
+                    Config.ToggleUIKey = d.config.toggleUIKey
+                end
+            end)
+        end
+    end
+end
+
 -- // Window
 local Window = Rayfield:CreateWindow({
-    Name            = "Remote Go Brr v0.1.0",
+    Name            = "Remote Go Brr v0.2.0",
     Icon            = 0,
     LoadingTitle    = "Remote Go Brr",
-    LoadingSubtitle = "v0.1.0",
+    LoadingSubtitle = "v0.2.0",
     Theme           = "Default",
-    ToggleUIKeybind = Enum.KeyCode.LeftControl,
+    ToggleUIKeybind = Enum.KeyCode[Config.ToggleUIKey] or Enum.KeyCode.LeftControl,
     ConfigurationSaving = {
         Enabled = false
     },
@@ -428,7 +456,7 @@ MainTab:CreateInput({
 
 MainTab:CreateDropdown({
     Name = "Setting to Change",
-    Options = {"Set Arguments", "Set Interval (ms)", "Set Burst Limit"},
+    Options = {"Set Arguments", "Set Interval (ms)", "Set Burst Limit", "Check Info"},
     CurrentOption = {"Set Arguments"},
     MultipleOptions = false,
     Flag = "TuneActionDropdown",
@@ -479,9 +507,70 @@ MainTab:CreateInput({
             else
                 Rayfield:Notify({ Title = "Error", Content = "Must be a number", Duration = 2 })
             end
+        elseif TuneActionType == "Check Info" then
+            local interval = data.intervalMs and (data.intervalMs .. "ms (custom)") or (Config.FireIntervalMs .. "ms (global)")
+            local burst = data.burstLimit and (data.fireCount .. "/" .. data.burstLimit) or "None"
+            local args = data.argString ~= "" and data.argString or "(none)"
+            local state = data.paused and "PAUSED" or "Active"
+            Rayfield:Notify({
+                Title = targetRemote.Name .. " Info",
+                Content = "State: " .. state ..
+                    "\nInterval: " .. interval ..
+                    "\nBurst: " .. burst ..
+                    "\nFired: " .. formatNumber(data.fireCount) ..
+                    "\nArgs: " .. args,
+                Duration = 8
+            })
         end
     end,
 })
+
+MainTab:CreateSection("Auto Clicker")
+
+local ClickerEnabled = false
+local ClickerIntervalMs = 100
+local ClickerMode = "Toggle"
+local ClickerHeld = false
+local ClickerToggle
+
+ClickerToggle = MainTab:CreateToggle({
+    Name = "LMB Auto Clicker",
+    CurrentValue = false,
+    Flag = "RGB_AutoClicker",
+    Callback = function(val) ClickerEnabled = val end,
+})
+
+MainTab:CreateDropdown({
+    Name = "Clicker Mode",
+    Options = {"Toggle", "Hold"},
+    CurrentOption = {"Toggle"},
+    MultipleOptions = false,
+    Flag = "RGB_ClickerMode",
+    Callback = function(Options) ClickerMode = Options[1] or Options end,
+})
+
+MainTab:CreateInput({
+    Name = "Click Interval (ms)",
+    CurrentValue = "100",
+    PlaceholderText = "100",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local num = tonumber(text)
+        if num then ClickerIntervalMs = math.floor(math.max(1, num)) end
+    end,
+})
+
+task.spawn(function()
+    while shared.AEH_Running and shared.AEH_SessionId == SessionId do
+        local active = ClickerEnabled and (ClickerMode == "Toggle" or ClickerHeld)
+        if active and not isUIVisible() then
+            mouse1click()
+            task.wait(ClickerIntervalMs / 1000)
+        else
+            task.wait(0.1)
+        end
+    end
+end)
 
 -- // Tab 2 - Browse
 local BrowseTab = Window:CreateTab("Browse", "folder")
@@ -706,6 +795,9 @@ doStartSpy = function()
         oldNc = hookmetamethod(game, "__namecall", function(self, ...)
             local method = getnamecallmethod()
             if IsLogging then
+                if IsAutoFiring then
+                    return oldNc(self, ...)
+                end
                 local isFire   = (method == "FireServer" and (self:IsA("RemoteEvent") or self:IsA("UnreliableRemoteEvent")))
                 local isInvoke = (method == "InvokeServer" and self:IsA("RemoteFunction"))
                 if (isFire or isInvoke) and not ExcludeList[self.Name] and not Hooked[self] then
@@ -825,6 +917,170 @@ SpyTab:CreateInput({
     end,
 })
 
+SpyTab:CreateSection("ClickDetectors")
+
+local CDSpyEnabled = false
+local CDSpyConn = nil
+local CDParagraph = SpyTab:CreateParagraph({ Title = "ClickDetectors (0)", Content = "Activate ClickDetector Spy, then click parts." })
+
+local function refreshCDList()
+    if #CDLog == 0 then
+        CDParagraph:Set({ Title = "ClickDetectors (0)", Content = "Activate ClickDetector Spy, then click parts." })
+    else
+        local lines = {}
+        for i, entry in ipairs(CDLog) do
+            lines[i] = i .. ". " .. entry.parentName .. " (max: " .. entry.maxDist .. ")\n     " .. entry.path
+        end
+        CDParagraph:Set({ Title = "ClickDetectors (" .. #CDLog .. ")", Content = table.concat(lines, "\n\n") })
+    end
+end
+
+SpyTab:CreateToggle({
+    Name = "ClickDetector Spy",
+    CurrentValue = false,
+    Flag = "RGB_CDSpy",
+    Callback = function(val)
+        CDSpyEnabled = val
+        if val then
+            CDLog = {}
+            refreshCDList()
+            local UIS = game:GetService("UserInputService")
+            local Camera = workspace.CurrentCamera
+            CDSpyConn = UIS.InputBegan:Connect(function(input, processed)
+                if not CDSpyEnabled then return end
+                if processed then return end
+                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                local ray = Camera:ViewportPointToRay(input.Position.X, input.Position.Y)
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = {}
+                local result = workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
+                if result and result.Instance then
+                    local part = result.Instance
+                    local cd = part:FindFirstChildWhichIsA("ClickDetector")
+                    if not cd and part.Parent then cd = part.Parent:FindFirstChildWhichIsA("ClickDetector") end
+                    if cd then
+                        local already = false
+                        for _, entry in ipairs(CDLog) do
+                            if entry.detector == cd then already = true; break end
+                        end
+                        if not already then
+                            table.insert(CDLog, {
+                                detector = cd,
+                                path = cd:GetFullName(),
+                                parentName = cd.Parent and cd.Parent.Name or "?",
+                                maxDist = cd.MaxActivationDistance,
+                            })
+                            refreshCDList()
+                        end
+                        Rayfield:Notify({ Title = "Captured", Content = cd.Parent.Name .. " (max: " .. cd.MaxActivationDistance .. ")", Duration = 2 })
+                    else
+                        Rayfield:Notify({ Title = "No ClickDetector", Content = part.Name, Duration = 2 })
+                    end
+                end
+            end)
+            table.insert(Connections, CDSpyConn)
+            Rayfield:Notify({ Title = "CD Spy ON", Content = "Click on parts to capture their ClickDetectors.", Duration = 3 })
+        else
+            if CDSpyConn then CDSpyConn:Disconnect(); CDSpyConn = nil end
+            Rayfield:Notify({ Title = "CD Spy OFF", Content = #CDLog .. " captured.", Duration = 2 })
+        end
+    end,
+})
+
+SpyTab:CreateInput({
+    Name = "Fire ClickDetector",
+    CurrentValue = "",
+    PlaceholderText = "index from list above",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(text)
+        local idx = tonumber(text)
+        if not idx or not CDLog[idx] then
+            Rayfield:Notify({ Title = "Invalid", Content = "Enter a valid index.", Duration = 2 })
+            return
+        end
+        local entry = CDLog[idx]
+        if fireclickdetector and entry.detector and entry.detector.Parent then
+            fireclickdetector(entry.detector)
+            Rayfield:Notify({ Title = "Fired", Content = entry.parentName, Duration = 2 })
+        else
+            Rayfield:Notify({ Title = "Error", Content = "Detector unavailable or fireclickdetector missing.", Duration = 3 })
+        end
+    end,
+})
+
+local CDDistanceMode = "Infinite (math.huge)"
+local CDCustomDistance = 100
+
+SpyTab:CreateDropdown({
+    Name = "Max Distance Mode",
+    Options = {"Infinite (math.huge)", "Custom Value"},
+    CurrentOption = {"Infinite (math.huge)"},
+    MultipleOptions = false,
+    Flag = "RGB_CDDistMode",
+    Callback = function(Options) CDDistanceMode = Options[1] or Options end,
+})
+
+SpyTab:CreateInput({
+    Name = "Custom Distance Value",
+    CurrentValue = "100",
+    PlaceholderText = "Enter number",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(text)
+        local num = tonumber(text)
+        if num then CDCustomDistance = num end
+    end,
+})
+
+SpyTab:CreateButton({
+    Name = "Apply Max Distance",
+    Callback = function()
+        local dist = (CDDistanceMode == "Infinite (math.huge)") and math.huge or CDCustomDistance
+        local count = 0
+        for _, desc in ipairs(game:GetDescendants()) do
+            if desc:IsA("ClickDetector") then
+                desc.MaxActivationDistance = dist
+                count = count + 1
+            end
+        end
+        Rayfield:Notify({ Title = "Distance Applied", Content = count .. " ClickDetector(s) set to " .. tostring(dist), Duration = 3 })
+    end,
+})
+
+SpyTab:CreateButton({
+    Name = "Scan ClickDetectors",
+    Callback = function()
+        local detectors = {}
+        for _, desc in ipairs(game:GetDescendants()) do
+            if desc:IsA("ClickDetector") then
+                table.insert(detectors, {
+                    path = desc:GetFullName(),
+                    maxDist = desc.MaxActivationDistance,
+                    parent = desc.Parent and desc.Parent.Name or "nil",
+                })
+            end
+        end
+        if #detectors == 0 then
+            Rayfield:Notify({ Title = "No ClickDetectors", Content = "None found in game.", Duration = 3 })
+            return
+        end
+        local lines = {}
+        for i, d in ipairs(detectors) do
+            if i > 50 then table.insert(lines, "... +" .. (#detectors - 50) .. " more"); break end
+            lines[i] = i .. ". " .. d.parent .. " (max: " .. d.maxDist .. ")"
+        end
+        Rayfield:Notify({ Title = #detectors .. " ClickDetector(s)", Content = table.concat(lines, "\n"), Duration = 10 })
+        if setclipboard then
+            local full = {}
+            for i, d in ipairs(detectors) do
+                full[i] = i .. ". " .. d.path .. " | MaxDist: " .. d.maxDist
+            end
+            setclipboard(table.concat(full, "\n"))
+            Rayfield:Notify({ Title = "Copied to clipboard", Duration = 2 })
+        end
+    end,
+})
+
 -- // Tab 4 - Settings
 local SettingsTab = Window:CreateTab("Settings", "settings")
 
@@ -866,6 +1122,8 @@ local function loadProfileData(name)
             if c.antiAFK ~= nil then Config.AntiAFK = c.antiAFK; if AFKToggle then AFKToggle:Set(c.antiAFK) end end
             if c.globalKeybinds ~= nil then Config.GlobalKeybinds = c.globalKeybinds; if GlobalKeyToggle then GlobalKeyToggle:Set(c.globalKeybinds) end end
             if c.showNonFirable ~= nil then Config.ShowNonFirable = c.showNonFirable; if ShowNonFirableToggle then ShowNonFirableToggle:Set(c.showNonFirable) end end
+            if c.autoSave ~= nil then Config.AutoSave = c.autoSave; if AutoSaveToggle then AutoSaveToggle:Set(c.autoSave) end end
+            if c.hideCursor ~= nil then Config.HideCursor = c.hideCursor; if HideCursorToggle then HideCursorToggle:Set(c.hideCursor) end; pcall(function() game:GetService("UserInputService").MouseIconEnabled = not c.hideCursor end) end
             IsInitializing = oldInit
         end
     end
@@ -926,7 +1184,9 @@ SettingsTab:CreateInput({
                 maxInterval = Config.MaxIntervalMs,
                 antiAFK = Config.AntiAFK,
                 globalKeybinds = Config.GlobalKeybinds,
-                showNonFirable = Config.ShowNonFirable
+                showNonFirable = Config.ShowNonFirable,
+                autoSave = Config.AutoSave,
+                hideCursor = Config.HideCursor
             }
         }
         pcall(writefile, SavePrefix .. "profile_" .. name .. ".json", HttpService:JSONEncode(payload))
@@ -996,6 +1256,18 @@ SettingsTab:CreateKeybind({
     end,
 })
 
+SettingsTab:CreateKeybind({
+    Name = "Toggle Auto Clicker",
+    CurrentKeybind = "V",
+    HoldToInteract = false,
+    Flag = "RGB_Key_Clicker",
+    Callback = function()
+        if not Config.GlobalKeybinds and not isUIVisible() then return end
+        ClickerEnabled = not ClickerEnabled
+        if ClickerToggle then ClickerToggle:Set(ClickerEnabled) end
+    end,
+})
+
 GlobalKeyToggle = SettingsTab:CreateToggle({
     Name = "Global Keybinds",
     CurrentValue = true,
@@ -1039,6 +1311,63 @@ AFKToggle = SettingsTab:CreateToggle({
                 Content = "Idle detection bypassed.",
                 Duration = 2 
             })
+        end
+    end,
+})
+
+AutoSaveToggle = SettingsTab:CreateToggle({
+    Name = "Auto-Save",
+    CurrentValue = true,
+    Flag = "RGB_AutoSave",
+    Callback = function(val)
+        Config.AutoSave = val
+        Rayfield:Notify({ Title = val and "Auto-Save ON" or "Auto-Save OFF", Duration = 2 })
+    end,
+})
+
+HideCursorToggle = SettingsTab:CreateToggle({
+    Name = "Hide Custom Cursor",
+    CurrentValue = false,
+    Flag = "RGB_HideCursor",
+    Callback = function(val)
+        Config.HideCursor = val
+        pcall(function() game:GetService("UserInputService").MouseIconEnabled = not val end)
+        if not IsInitializing then saveHookedRemotes() end
+        Rayfield:Notify({ Title = val and "Custom Cursor Hidden" or "Custom Cursor Restored", Duration = 2 })
+    end,
+})
+
+-- // Hold-mode listener for Auto Clicker
+do
+    local UIS = game:GetService("UserInputService")
+    local holdConn1 = UIS.InputBegan:Connect(function(input, processed)
+        if processed then return end
+        if ClickerMode == "Hold" and input.KeyCode == Enum.KeyCode.V then
+            ClickerHeld = true
+        end
+    end)
+    local holdConn2 = UIS.InputEnded:Connect(function(input)
+        if input.KeyCode == Enum.KeyCode.V then
+            ClickerHeld = false
+        end
+    end)
+    table.insert(Connections, holdConn1)
+    table.insert(Connections, holdConn2)
+end
+
+SettingsTab:CreateInput({
+    Name = "UI Toggle Key (applies next run)",
+    CurrentValue = Config.ToggleUIKey,
+    PlaceholderText = "e.g. Insert, LeftControl",
+    RemoveTextAfterFocusLost = true,
+    Callback = function(text)
+        if text == "" then return end
+        if Enum.KeyCode[text] then
+            Config.ToggleUIKey = text
+            if not IsInitializing then saveHookedRemotes() end
+            Rayfield:Notify({ Title = "UI Key saved", Content = text .. " (applies next execution)", Duration = 3 })
+        else
+            Rayfield:Notify({ Title = "Invalid key", Content = text .. " is not a valid KeyCode.", Duration = 3 })
         end
     end,
 })
@@ -1137,7 +1466,7 @@ task.spawn(function()
     local lastUIUpdate = 0
     local displayRate = 0
 
-    while shared.AEH_Running do
+    while shared.AEH_Running and shared.AEH_SessionId == SessionId do
         RunService.Heartbeat:Wait()
         local now = tick()
         if Config.Enabled and HookedCount > 0 then
@@ -1171,7 +1500,7 @@ end)
 
 -- // Auto-Fire Engine
 task.spawn(function()
-    while shared.AEH_Running do
+    while shared.AEH_Running and shared.AEH_SessionId == SessionId do
         if Config.Enabled and HookedCount > 0 then
             local now = tick()
             for remote, data in pairs(Hooked) do
@@ -1190,12 +1519,15 @@ task.spawn(function()
                 if not remote or not remote.Parent then task.defer(unhookRemote, remote); continue end
 
                 local ok, err = pcall(function()
+                    IsAutoFiring = true
                     if data.args and data.args.n and data.args.n > 0 then
                         remote:FireServer(unpack(data.args, 1, data.args.n))
                     else
                         remote:FireServer()
                     end
+                    IsAutoFiring = false
                 end)
+                IsAutoFiring = false
 
                 if ok then
                     data.lastFired = now
@@ -1249,8 +1581,10 @@ shared.AEH_Cleanup = function()
         pcall(setclipboard, table.concat(lines, "\n"))
     end
     pcall(function() Rayfield:Destroy() end)
+    pcall(function() game:GetService("UserInputService").MouseIconEnabled = true end)
     shared.AEH_Cleanup = nil
     shared.AEH_Running = nil
+    shared.AEH_SessionId = nil
 end
 
 -- // Init
@@ -1277,6 +1611,8 @@ pcall(function() if AutoToggle then AutoToggle:Set(Config.Enabled) end end)
 pcall(function() if AFKToggle then AFKToggle:Set(Config.AntiAFK) end end)
 pcall(function() if GlobalKeyToggle then GlobalKeyToggle:Set(Config.GlobalKeybinds) end end)
 pcall(function() if ShowNonFirableToggle then ShowNonFirableToggle:Set(Config.ShowNonFirable) end end)
+pcall(function() if AutoSaveToggle then AutoSaveToggle:Set(Config.AutoSave) end end)
+pcall(function() if HideCursorToggle then HideCursorToggle:Set(Config.HideCursor) end end)
 if refreshStatus then refreshStatus() end
 if refreshHookedList then refreshHookedList() end
 
